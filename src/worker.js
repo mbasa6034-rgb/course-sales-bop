@@ -1,6 +1,7 @@
 /* =====================================================================
  *  COURSE SALES BOT + ADMIN PANEL  (single file: src/worker.js)
  *  Telegram + Cloudflare Workers + KV
+ *  Delivery: private group invite + direct link to the subject topic
  * ===================================================================== */
 
 // ----------------------------- DEFAULTS --------------------------------
@@ -28,8 +29,8 @@ const DEFAULT_CATALOG = {
       description: "Full notes, worked examples and past exam questions.",
       sample: { type: "document", fileId: "", text: "Chapter 1: Limits and Continuity (preview)" },
       fields: {
-        social: { label: "Social", price: 300, groupId: "", deliveryFileId: "", deliveryText: "" },
-        natural: { label: "Natural", price: 350, groupId: "", deliveryFileId: "", deliveryText: "" },
+        social: { label: "Social", price: 300, groupId: "", topicId: "", deliveryFileId: "", deliveryText: "" },
+        natural: { label: "Natural", price: 350, groupId: "", topicId: "", deliveryFileId: "", deliveryText: "" },
       },
     },
   ],
@@ -48,6 +49,7 @@ const LABELS = {
   price: "price (numbers only)",
   deliveryText: "delivery text",
   groupId: "group ID (starts with -100)",
+  topicId: "topic ID (a number, or 0 to clear)",
   bank: "bank details",
   telebirr: "Telebirr details",
   welcome: "welcome message",
@@ -134,6 +136,10 @@ const findCourse = (cat, id) => cat.courses.find((c) => c.id === id);
 const newId = () => crypto.randomUUID().slice(0, 6);
 const slug = (s) =>
   s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 20) || newId();
+
+// Direct link to a topic inside a private supergroup: t.me/c/<id without -100>/<topic id>
+const topicLink = (field) =>
+  `https://t.me/c/${String(field.groupId).replace(/^-100/, "")}/${field.topicId}`;
 
 async function hasSession(env, uid) {
   const s = await getJSON(env, `asess:${uid}`);
@@ -317,10 +323,11 @@ async function handleDecision(cb, env, data) {
   order.reviewedAt = Date.now();
   await putJSON(env, `order:${order.id}`, order);
 
+  const cat = await getCatalog(env);
+  const course = findCourse(cat, order.courseId);
+  const field = course?.fields[order.field];
+
   if (approved) {
-    const cat = await getCatalog(env);
-    const course = findCourse(cat, order.courseId);
-    const field = course?.fields[order.field];
     if (field) await deliver(env, order.chatId, order, course, field);
     else await send(env, order.chatId, "⚠️ There was a delivery issue. Our team will contact you shortly.");
   } else {
@@ -332,9 +339,6 @@ async function handleDecision(cb, env, data) {
     ? `✅ Approved by ${esc(cb.from.first_name)}`
     : `❌ Rejected by ${esc(cb.from.first_name)}`;
 
-  const cat = await getCatalog(env);
-  const course = findCourse(cat, order.courseId);
-  const field = course?.fields[order.field];
   for (const m of order.adminMessages) {
     await tg(env, "editMessageCaption", {
       chat_id: m.chatId,
@@ -346,7 +350,7 @@ async function handleDecision(cb, env, data) {
   return answer(env, cb.id, approved ? "Approved ✅" : "Rejected ❌");
 }
 
-// Delivery order: 1) private group invite link, 2) uploaded file, 3) text
+// Delivery order: 1) private group invite (+ topic link), 2) uploaded file, 3) text
 async function deliver(env, chatId, order, course, field) {
   await send(env, chatId, `🎉 <b>Payment verified!</b> Order <b>#${order.id}</b>. Thank you.`);
 
@@ -357,13 +361,18 @@ async function deliver(env, chatId, order, course, field) {
       member_limit: 1,
       expire_date: Math.floor(Date.now() / 1000) + INVITE_EXPIRY_DAYS * 24 * 3600,
     });
+
     if (link.ok) {
+      const topicLine = field.topicId
+        ? `\n\n🧵 <b>Your subject topic</b> (open it after you join):\n${topicLink(field)}`
+        : "";
       return send(env, chatId,
         `📦 <b>${esc(course.title)} — ${esc(field.label)}</b>\n\n` +
-        `Join your private group using this link. It works once and expires in ${INVITE_EXPIRY_DAYS} days:\n` +
+        `1️⃣ Join your private group with this link. It works once and expires in ${INVITE_EXPIRY_DAYS} days:\n` +
         `${link.result.invite_link}\n\n` +
-        `Please don't share it.`);
+        `2️⃣ Do not share this link.${topicLine}`);
     }
+
     console.error("Invite link failed:", link.description);
     await send(env, chatId, "⚠️ We couldn't create your group link right now. Our team will send it shortly.");
   }
@@ -458,6 +467,7 @@ async function adminField(env, chatId, msgId, cat, id, fk) {
     `🧩 <b>${esc(c.title)}</b> — <b>${esc(f.label)}</b>\n\n` +
     `💰 Price: ${f.price} ${cat.currency}\n` +
     `👥 Private group: ${f.groupId ? `✅ ${esc(f.groupId)}` : "❌ not set"}\n` +
+    `🧵 Topic ID: ${f.topicId ? `✅ ${esc(f.topicId)}` : "❌ not set"}\n` +
     `📎 Delivery file: ${f.deliveryFileId ? "✅ set" : "❌ not set"}\n` +
     `📝 Delivery text: ${esc(f.deliveryText) || "—"}`;
   return render(env, chatId, msgId, text, kb([
@@ -465,7 +475,10 @@ async function adminField(env, chatId, msgId, cat, id, fk) {
       { text: "✏️ Name", callback_data: `a:ef:${id}:${fk}:label` },
       { text: "💰 Price", callback_data: `a:ef:${id}:${fk}:price` },
     ],
-    [{ text: "👥 Group ID", callback_data: `a:ef:${id}:${fk}:groupId` }],
+    [
+      { text: "👥 Group ID", callback_data: `a:ef:${id}:${fk}:groupId` },
+      { text: "🧵 Topic ID", callback_data: `a:ef:${id}:${fk}:topicId` },
+    ],
     [
       { text: "📝 Delivery text", callback_data: `a:ef:${id}:${fk}:deliveryText` },
       { text: "📎 Delivery file", callback_data: `a:df:${id}:${fk}` },
@@ -669,7 +682,7 @@ async function handleAdminInput(msg, env, state) {
       }
       let key = slug(label);
       if (course.fields[key]) key = `${key}-${newId().slice(0, 3)}`;
-      course.fields[key] = { label, price, groupId: "", deliveryFileId: "", deliveryText: "" };
+      course.fields[key] = { label, price, groupId: "", topicId: "", deliveryFileId: "", deliveryText: "" };
       done = () => adminFields(env, chatId, null, cat, course.id);
       break;
     }
@@ -677,6 +690,7 @@ async function handleAdminInput(msg, env, state) {
     case "edit_field": {
       const field = course?.fields[state.fieldKey];
       if (!field) return send(env, chatId, "Field not found.");
+
       if (state.key === "price") {
         const p = Number(text);
         if (!Number.isFinite(p) || p <= 0) return send(env, chatId, "Price must be a positive number.");
@@ -690,7 +704,12 @@ async function handleAdminInput(msg, env, state) {
           return send(env, chatId, "The group ID must start with -100 and contain only numbers. Try again or /cancel.");
         }
         field.groupId = text;
+      } else if (state.key === "topicId") {
+        if (text === "0") field.topicId = "";
+        else if (/^\d+$/.test(text)) field.topicId = text;
+        else return send(env, chatId, "Topic ID must be a number, or 0 to clear. Try again or /cancel.");
       }
+
       done = () => adminField(env, chatId, null, cat, course.id, state.fieldKey);
       break;
     }
