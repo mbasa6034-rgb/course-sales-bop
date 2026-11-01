@@ -1,0 +1,10 @@
+name = "course-sales-bot"
+main = "src/worker.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+ADMIN_IDS = "8191362281,8575621625"
+
+[[kv_namespaces]]
+binding = "DB"
+id = "16282319c2ae4fbf865887a89ceb6f4b"
